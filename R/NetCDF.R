@@ -1,39 +1,24 @@
-#' @importFrom ncdf4 nc_open nc_close
-.varnames <- function(x) {
-  names(.ndims(x))
-}
-.ndims <- function(x) {
-  nc <- nc_open(x)
-  dims <- sapply(nc$var, "[[", "ndims")
-  nc_close(nc)
-  dims
-}
 
-.dimnames <- function(x, varname) {
-  nc <- nc_open(x)
-  names(nc$dim[nc$var[[varname]]$dimids])
-}
 
-varcoords <- function(x, varname) {
-  x <- NetCDF(x)
-   arrange_(inner_join(select_(inner_join(dplyr::filter(x$variable, .dots = list(~name == varname)), x$vardim), "id", "dimids"), x$dimension, c("dimids" = "id")), "dimids")$name
+
+ncatts <- function(x) {
+  UseMethod("ncatts")
 }
 
 #' @importFrom ncdf4 ncatt_get
 #' @importFrom stats setNames
-ncatts <- function(x) {
-  on.exit(nc_close(ncf))
+#' @importFrom ncdf4 nc_open nc_close ncatt_get 
+ncatts.character <- function(x) {
+  on.exit(ncdf4::nc_close(ncf))
   ncf <- ncdf4::nc_open(x)
-  global <- as_data_frame(ncdf4::ncatt_get(ncf, 0))
+  global <- tibble::as_tibble(ncdf4::ncatt_get(ncf, 0))
   var <- setNames(vector('list', length(ncf$var)), names(ncf$var))
   childvar <- var
-  #lapply(names(ncf$var), 
-  #              function(vname) as_data_frame(ncatt_get(ncf, vname)))
   for (vname in names(ncf$var)) {
     aaa <- ncatt_get(ncf, vname)
     lts <- lengths(aaa)
     if (length(unique(lts)) > 1) {
-      tabs <- lapply(split(aaa, lts), as_data_frame)
+      tabs <- lapply(split(aaa, lts), tibble::as_tibble)
       var[[vname]] <- tabs[[1]]
       childvar[[vname]] <- tabs[-1]
     } 
@@ -66,7 +51,7 @@ ncatts <- function(x) {
 #'  
 #'  In addition to a data for each of the main entities above 'NetCDF' also creates:  
 #'  \tabular{ll}{
-#'  \code{unlimdims} \tab the unlimited dimensions identify those which are not a constant lenghth (i.e. spread over files) \cr
+#'  \code{unlimdims} \tab the unlimited dimensions identify those which are not a constant length (i.e. spread over files) \cr
 #'  \code{dimvals} \tab a link table between dimensions and its coordinates \cr
 #'  \code{file} \tab information about the file itself \cr
 #'  \code{vardim} \tab a link table between variables and their dimensions \cr
@@ -77,39 +62,61 @@ ncatts <- function(x) {
 #'  as a single entity. 
 #'  
 #'  The 'ncdump -h' print summary above is analogous to the print method [ncdf4::print.ncdf4] of the output of [ncdf4::nc_open]. 
+#'  The approach here is under review, probably forever. https://github.com/hypertidy/ncdump/issues/8
 #' @param x path to NetCDF file
 #' @export
 #' @importFrom ncdf4 nc_open
-#' @importFrom dplyr as_data_frame bind_rows data_frame
+#' @importFrom rlang .data
+#' @importFrom dplyr  bind_rows mutate 
+#' @importFrom tibble as_tibble tibble
 #' @seealso [ncdf4::nc_open] which is what this function uses to obtain the information 
 #' @return A list of data frames with an unused S3 class 'NetCDF', see details for a description of the data frames. The 'attribute' 
 #' data frame has class 'NetCDF_attributes', this is used with a custom print method to reduce the amount of output printed. 
-#' @examples 
+#' @examples
 #' rnc <- NetCDF(system.file("extdata", "S2008001.L3m_DAY_CHL_chlor_a_9km.nc", package= "ncdump"))
-#' rnc
 NetCDF <- function(x) {
   nc <- ncdf4::nc_open(x)
-  dims <- do.call(dplyr::bind_rows, lapply(nc$dim, function(x) dplyr::as_data_frame(x[!names(x) %in% c("dimvarid", "vals", "units", "calendar")])))
+  dimension <- dplyr::bind_rows(lapply(nc$dim, function(x) tibble::as_tibble(x[!names(x) %in% c("dimvarid", "vals", "units", "calendar")])))
   unlimdims <- NULL
-  if (any(dims$unlim)) unlimdims <- do.call(dplyr::bind_rows, lapply( nc$dim[dims$unlim], function(x) as_data_frame(x[names(x) %in% c("id", "units", "calendar")])))
+  if (any(dimension$unlim)) unlimdims <- dplyr::bind_rows(lapply( nc$dim[dimension$unlim], function(x) dplyr::tibble(x[names(x) %in% c("id", "vals", "units", "calendar")])))
   ## do we care that some dims are degenerate 1D?
   ##lapply(nc$dim, function(x) dim(x$vals))
-  dimvals <- do.call(dplyr::bind_rows, lapply(nc$dim, function(x) dplyr::data_frame(id = rep(x$id, length(x$vals)), vals = x$vals)))
+  #split_if_character <- function(x) switch(mode(x), character = unlist(strsplit(x, "\\s+")), numeric = x)
+  #null_if_char <- function(x) 
+weird_char_dimvals <- unlist(lapply(nc$dim, function(x) is.character(x$vals)))
+    dimension_values <- dplyr::bind_rows(
+    lapply(nc$dim[!weird_char_dimvals], function(x) {
+      ## some of these are matrices
+      tibble::tibble(id = rep(x$id, length(x$vals)), vals = as.vector(x$vals))
+    })
+    )
   ## the dimids are in the dims table above
-  groups <- do.call(dplyr::bind_rows, lapply(nc$groups, function(x) dplyr::as_data_frame(x[!names(x) %in% "dimid"]))) #as_data_frame[x[!names(x) %in% "dimid"]]))
+  group <- dplyr::bind_rows(lapply(nc$groups, function(x) tibble::as_tibble(x[!names(x) %in% "dimid"]))) 
   ## leave the fqgn2Rindex for now
-  file <- dplyr::as_data_frame(nc[!names(nc) %in% c("dim", "var", "groups", "fqgn2Rindex")])
+  file <- tibble::as_tibble(nc[!names(nc) %in% c("dim", "var", "groups", "fqgn2Rindex")])
   ## when we drop these, how do we track keeping them elsewhere?
-  var <- do.call(dplyr::bind_rows, lapply(nc$var, function(x) dplyr::as_data_frame(x[!names(x) %in% c("chunksizes", "id", "dims", "dim", "varsize", "size", "dimids")])))
-  var$id <- sapply(nc$var, function(x) x$id$id)
-  vardim <- do.call(bind_rows, lapply(nc$var, function(x) data_frame(id = rep(x$id$id, length(x$dimids)), dimids = x$dimids)))
+  variable <- dplyr::bind_rows(lapply(nc$var, function(x) tibble::as_tibble(x[!names(x) %in% c("chunksizes", "id", "dims", "dim", "missval", "varsize", "size", "dimids")])))
+  variable$.variable_ <- sapply(nc$var, function(x) x$id$id)
+  variable_link_dimension <- dplyr::bind_rows(lapply(nc$var, function(x) tibble::tibble(.variable_ = rep(x$id$id, length(x$dimids)), .dimension_ = x$dimids)))
   ## read attributes, should be made optional (?) to avoid long read time
   atts <- ncatts(x)
   class(atts) <- c("NetCDF_attributes", "list")
-  nc_close(nc)
-  x <- list(dimension = dims, unlimdims = unlimdims, dimvals = dimvals, groups = groups, file = file, variable = var, 
-            vardim = vardim, attribute = atts)
-  class(x) <- c("NetCDF", "list")
+  ncdf4::nc_close(nc)
+  
+  ## create our IDs
+  dimension <- dplyr::mutate(dimension, .dimension_  = .data$id,  .group_ = .data$group_id)
+  ## TODO unlimdims
+  dimension_values  <- dplyr::mutate(dimension_values, .dimension_ = .data$id)
+  group  <- mutate(group, .group_  = .data$id)
+  file    <- mutate(file, .file_ = .data$id) ##  (this should probably be replaced ?)
+  variable  <- mutate(variable, .group_ = group$.group_[.data$group_index])
+  
+  
+  x <- list(dimension = dimension, 
+            unlimdims = unlimdims, 
+            dimension_values = dimension_values, group = group, file = file, variable = variable, 
+            vardim = variable_link_dimension, attribute = atts)
+  class(x) <- c("ncdump", "list")
   x
 }
 #' @importFrom utils head
@@ -136,17 +143,16 @@ vars <- function(x, ...) UseMethod("vars")
 
 #' @rdname vars
 #' @noRd
-vars.NetCDF <- function(x, ...) {
+vars.ncdump <- function(x, ...) {
   x$variable
 }
 
 #' @rdname vars
 #' @noRd
 dims <- function(x, ...) UseMethod("dims")
-
 #' @rdname vars
 #' @noRd
-dims.NetCDF <- function(x, ...) {
+dims.ncdump <- function(x, ...) {
   x$dimension
 }
 
@@ -157,17 +163,17 @@ dimvars <- function(x, ...) UseMethod("dimvars")
 #' @rdname vars
 #' @noRd
 #' @importFrom dplyr %>% arrange_ filter filter_  inner_join select select_
-dimvars.NetCDF <- function(x, ...) {
+dimvars.ncdump <- function(x, ...) {
   dmv <- (dims(x) %>% filter_("create_dimvar") %>% select_("name"))$name
   ndv <- length(dmv)
   ndims <- rep(0, ndv)
-  data_frame(name = dmv, 
-             ndims = ndims, natts = ndims) 
-             ## todo, how much is create_dimvar ncdf4 only?
-             # prec = rep("float", ndv), 
-             # units = rep("", ndv), 
-             # longname = units, group_index = 
-             # 
+  tibble(name = dmv, 
+         ndims = ndims, natts = ndims) 
+  ## todo, how much is create_dimvar ncdf4 only?
+  # prec = rep("float", ndv), 
+  # units = rep("", ndv), 
+  # longname = units, group_index = 
+  # 
 }
 
 
@@ -182,7 +188,7 @@ atts <- function(x, ...) {
 
 #' @rdname vars
 #' @noRd
-atts.NetCDF <- function(x, varname = "globalatts", ...) {
+atts.ncdump <- function(x, varname = "globalatts", ...) {
   if (varname == "globalatts") {
     x$attribute$global 
   } else {
@@ -194,17 +200,18 @@ atts.NetCDF <- function(x, varname = "globalatts", ...) {
 }
 
 #' @importFrom dplyr filter_
-"[[.NetCDF" <- function(x,i,j,...,drop=TRUE) {
+"[[.ncdump" <- function(x,i,j,...,drop=TRUE) {
   var <-  filter_(x$variable, .dots = list(~name == i))
- class(var) <- c("NetCDFVariable", class(var))
+  class(var) <- c("NetCDFVariable", class(var))
   var
 }
 
+#' @export
 print.NetCDFVariable <- function(x, ...) {
   print(t(as.matrix(x)))
 }
 
-#library(lazyeval)
+#' @export
 "[.NetCDFVariable" <- function(x, i, j, ..., drop = TRUE) {
   # il <- lazy(i)
   # jl <- lazy(j)
